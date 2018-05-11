@@ -24,6 +24,7 @@
 #endif
 
 #include <libswscale/swscale.h>
+#include <libavutil/cpu.h>
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
@@ -553,10 +554,10 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
   mmx_flags = orc_target_get_default_flags (orc_target_get_by_name ("mmx"));
   altivec_flags =
       orc_target_get_default_flags (orc_target_get_by_name ("altivec"));
-  swsflags = (mmx_flags & ORC_TARGET_MMX_MMX ? SWS_CPU_CAPS_MMX : 0)
-      | (mmx_flags & ORC_TARGET_MMX_MMXEXT ? SWS_CPU_CAPS_MMX2 : 0)
-      | (mmx_flags & ORC_TARGET_MMX_3DNOW ? SWS_CPU_CAPS_3DNOW : 0)
-      | (altivec_flags & ORC_TARGET_ALTIVEC_ALTIVEC ? SWS_CPU_CAPS_ALTIVEC : 0);
+  swsflags = (mmx_flags & ORC_TARGET_MMX_MMX ? AV_CPU_FLAG_MMX : 0)
+      | (mmx_flags & ORC_TARGET_MMX_MMXEXT ? AV_CPU_FLAG_MMXEXT : 0)
+      | (mmx_flags & ORC_TARGET_MMX_3DNOW ? AV_CPU_FLAG_3DNOW : 0)
+      | (altivec_flags & ORC_TARGET_ALTIVEC_ALTIVEC ? AV_CPU_FLAG_ALTIVEC : 0);
 #else
   swsflags = 0;
 #endif
