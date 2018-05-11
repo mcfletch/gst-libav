@@ -266,6 +266,11 @@ gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
   const GValue *par;
 
   /* this function is always called with a simple caps */
+  if (!GST_CAPS_IS_SIMPLE (caps)) {
+    GST_ERROR_OBJECT (trans,
+        "Non-simple caps passed to transform caps function: %s",
+        gst_caps_to_string (caps));
+  }
   g_return_val_if_fail (GST_CAPS_IS_SIMPLE (caps), NULL);
 
   structure = gst_caps_get_structure (caps, 0);
