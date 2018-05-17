@@ -239,24 +239,6 @@ gst_ffmpegscale_finalize (GObject * object)
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
-/* copies the given caps */
-static GstCaps *
-gst_ffmpegscale_caps_remove_format_info (GstCaps * caps)
-{
-  int i;
-  GstStructure *structure;
-
-  caps = gst_caps_copy (caps);
-
-  for (i = 0; i < gst_caps_get_size (caps); i++) {
-    structure = gst_caps_get_structure (caps, i);
-
-    gst_structure_remove_field (structure, "format");
-  }
-
-  return caps;
-}
-
 static GstCaps *
 gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
     GstPadDirection direction, GstCaps * caps, GstCaps * filter)
@@ -264,38 +246,45 @@ gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
   GstCaps *ret;
   GstStructure *structure;
   const GValue *par;
+  guint structure_index = 0;
 
-  /* this function is always called with a simple caps */
-  if (!GST_CAPS_IS_SIMPLE (caps)) {
-    GST_ERROR_OBJECT (trans,
-        "Non-simple caps passed to transform caps function: %s",
-        gst_caps_to_string (caps));
-  }
-  g_return_val_if_fail (GST_CAPS_IS_SIMPLE (caps), NULL);
+  // This assertion seems wrong, the code below should be 
+  // explicitly allowing for alternative structures in caps
+  // g_return_val_if_fail (GST_CAPS_IS_SIMPLE (caps), NULL);
 
-  structure = gst_caps_get_structure (caps, 0);
+  // Our goal here is to "expand" each caps sub-structure such that 
+  // the resulting caps capture the idea that we can change the size
+  // and colour-space format...
+
+  GST_DEBUG_OBJECT (trans, "Caps to transform: %s", gst_caps_to_string (caps));
 
   ret = gst_caps_copy (caps);
-  structure = gst_structure_copy (gst_caps_get_structure (ret, 0));
 
-  gst_structure_set (structure,
-      "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
-      "height", GST_TYPE_INT_RANGE, 1, G_MAXINT, NULL);
+  for (structure_index = 0; structure_index < gst_caps_get_size (caps);
+      structure_index++) {
+    // Get a *copy* of the nth structure in caps
+    structure = gst_structure_copy (gst_caps_get_structure (ret, 0));
+    // Set the width/height values to anything we can handle
 
-  ret = gst_caps_merge_structure (ret, gst_structure_copy (structure));
-
-  /* if pixel aspect ratio, make a range of it */
-  if ((par = gst_structure_get_value (structure, "pixel-aspect-ratio"))) {
     gst_structure_set (structure,
-        "pixel-aspect-ratio", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1, NULL);
+        "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
+        "height", GST_TYPE_INT_RANGE, 1, G_MAXINT, NULL);
+    gst_structure_remove_field (structure, "format");
 
-    ret = gst_caps_merge_structure (ret, structure);
-  } else {
-    gst_structure_free (structure);
+    // Now merge that updated structure into the return caps
+    ret = gst_caps_merge_structure (ret, gst_structure_copy (structure));
+
+    /* iff pixel aspect ratio is defined, make a range of it */
+    if ((par = gst_structure_get_value (structure, "pixel-aspect-ratio"))) {
+      gst_structure_set (structure,
+          "pixel-aspect-ratio", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1,
+          NULL);
+      // note: takes ownership of the pass structure
+      ret = gst_caps_merge_structure (ret, structure);
+    } else {
+      gst_structure_free (structure);
+    }
   }
-
-  /* now also unfix colour space format */
-  gst_caps_append (ret, gst_ffmpegscale_caps_remove_format_info (ret));
 
   GST_DEBUG_OBJECT (trans, "returning caps: %" GST_PTR_FORMAT, ret);
 
@@ -311,11 +300,22 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
 
   othercaps = gst_caps_make_writable (othercaps);
 
-  GST_DEBUG_OBJECT (trans, "trying to fixate othercaps %" GST_PTR_FORMAT
+  GST_WARNING_OBJECT (trans, "trying to fixate othercaps %" GST_PTR_FORMAT
       " based on caps %" GST_PTR_FORMAT, othercaps, caps);
 
+  // TODO: reference is lost here...
+  //othercaps = gst_caps_intersect_full(caps,othercaps,GST_CAPS_INTERSECT_FIRST);
+  //GST_DEBUG_OBJECT (trans, "intersected %s",gst_caps_to_string(othercaps));
+
+  othercaps = gst_caps_simplify (othercaps);
+
+  // Again, this assumption that there's only one structure in the caps...
   ins = gst_caps_get_structure (caps, 0);
   outs = gst_caps_get_structure (othercaps, 0);
+  if (gst_caps_get_size (othercaps) > 1) {
+    GST_DEBUG_OBJECT (trans, "Non-simple othercaps: %s",
+        gst_caps_to_string (caps));
+  }
 
   from_par = gst_structure_get_value (ins, "pixel-aspect-ratio");
   to_par = gst_structure_get_value (outs, "pixel-aspect-ratio");
@@ -350,8 +350,23 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
     if (gst_structure_get_int (outs, "height", &h))
       ++count;
     if (count == 2) {
-      GST_DEBUG_OBJECT (trans, "dimensions already set to %dx%d, not fixating",
-          w, h);
+      const GValue *out_format;
+      out_format = gst_structure_get_value (outs, "format");
+      if (!gst_value_is_fixed (out_format)) {
+        // Not quite right here, as in_format might not be acceptable, but we 
+        // can transform to it
+        if (!gst_structure_fixate_field_string (outs, "format",
+                gst_structure_get_string (ins, "format"))) {
+          GST_DEBUG_OBJECT (trans,
+              "Need to do a format transformation, making assumption we can");
+          gst_structure_fixate_field (outs, "format");
+        };
+      }
+
+      gst_structure_fixate_field_nearest_fraction (outs, "pixel-aspect-ratio",
+          from_par_n, from_par_d);
+      GST_DEBUG_OBJECT (trans, "dimensions already set to %dx%d => %s", w, h,
+          gst_caps_to_string (othercaps));
       return othercaps;
     }
 
@@ -457,6 +472,8 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
   if (gst_video_info_from_caps (&info, caps))
     goto invalid_caps;
 
+  GST_DEBUG ("video info format %s", GST_VIDEO_INFO_NAME (&info));
+
   switch (GST_VIDEO_INFO_FORMAT (&info)) {
     case GST_VIDEO_FORMAT_YUY2:
       pix_fmt = AV_PIX_FMT_YUYV422;
@@ -512,6 +529,8 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
   /* ERROR */
 invalid_caps:
   {
+    GST_ERROR ("Unable to convert caps to videoinfo %" GST_PTR_FORMAT
+        " fixed=%d", caps, gst_caps_is_fixed (caps));
     return AV_PIX_FMT_NONE;
   }
 }
@@ -544,8 +563,10 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
   if (!ok || scale->in_pixfmt == AV_PIX_FMT_NONE ||
       scale->out_pixfmt == AV_PIX_FMT_NONE ||
       GST_VIDEO_INFO_FORMAT (&scale->in_info) == GST_VIDEO_FORMAT_UNKNOWN ||
-      GST_VIDEO_INFO_FORMAT (&scale->out_info) == GST_VIDEO_FORMAT_UNKNOWN)
+      GST_VIDEO_INFO_FORMAT (&scale->out_info) == GST_VIDEO_FORMAT_UNKNOWN) {
+    GST_ERROR_OBJECT (trans, "Rejecting format");
     goto refuse_caps;
+  }
 
   GST_DEBUG_OBJECT (scale, "format %d => %d, from=%dx%d -> to=%dx%d",
       GST_VIDEO_INFO_FORMAT (&scale->in_info),
