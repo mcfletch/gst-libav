@@ -10,4 +10,4 @@ gst-launch-1.0 --gst-debug=video-info:5,3 \
     capsfilter name=biginput caps="video/x-raw,format=I420,width=1920,height=1080,framerate=30001/1000" ! \
     avvideoscale ! \
     capsfilter name=smalloutput caps="video/x-raw,width=720,height=480" ! \
-    fakesink
+    gtksink

@@ -469,7 +469,7 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
 
   GST_DEBUG ("converting caps %" GST_PTR_FORMAT, caps);
 
-  if (gst_video_info_from_caps (&info, caps))
+  if (!gst_video_info_from_caps (&info, caps))
     goto invalid_caps;
 
   GST_DEBUG ("video info format %s", GST_VIDEO_INFO_NAME (&info));
@@ -496,9 +496,11 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
     case GST_VIDEO_FORMAT_ARGB:
       pix_fmt = AV_PIX_FMT_ARGB;
       break;
+    case GST_VIDEO_FORMAT_RGBx:        // TODO: is there a better format here? we don't actually want the alpha processed...
     case GST_VIDEO_FORMAT_RGBA:
       pix_fmt = AV_PIX_FMT_RGBA;
       break;
+    case GST_VIDEO_FORMAT_BGRx:
     case GST_VIDEO_FORMAT_BGRA:
       pix_fmt = AV_PIX_FMT_BGRA;
       break;
@@ -555,7 +557,7 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
   }
 
   ok = gst_video_info_from_caps (&scale->in_info, incaps);
-  ok &= gst_video_info_from_caps (&scale->out_info, outcaps);
+  ok = gst_video_info_from_caps (&scale->out_info, outcaps) && ok;
 
   scale->in_pixfmt = gst_ffmpeg_caps_to_pixfmt (incaps);
   scale->out_pixfmt = gst_ffmpeg_caps_to_pixfmt (outcaps);
@@ -564,7 +566,9 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
       scale->out_pixfmt == AV_PIX_FMT_NONE ||
       GST_VIDEO_INFO_FORMAT (&scale->in_info) == GST_VIDEO_FORMAT_UNKNOWN ||
       GST_VIDEO_INFO_FORMAT (&scale->out_info) == GST_VIDEO_FORMAT_UNKNOWN) {
-    GST_ERROR_OBJECT (trans, "Rejecting format");
+    GST_ERROR_OBJECT (trans,
+        "Rejecting format parse=%d in=%d out=%d",
+        ok, scale->in_pixfmt, scale->out_pixfmt);
     goto refuse_caps;
   }
 
@@ -576,7 +580,11 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
       GST_VIDEO_INFO_WIDTH (&scale->out_info),
       GST_VIDEO_INFO_HEIGHT (&scale->out_info));
 
+#if 0
 #ifdef HAVE_ORC
+  // Apparently previously libswscale would let you configure the particular
+  // orc backend you were going to use, but these flag values are now used 
+  // solely for method-selection...
   mmx_flags = orc_target_get_default_flags (orc_target_get_by_name ("mmx"));
   altivec_flags =
       orc_target_get_default_flags (orc_target_get_by_name ("altivec"));
@@ -587,11 +595,17 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
 #else
   swsflags = 0;
 #endif
+#endif
+
+  swsflags = 0;
+
+  swsflags |= gst_ffmpegscale_method_flags[scale->method];
+
+  GST_DEBUG_OBJECT (scale, "SWS flags %d", swsflags);
 
   scale->ctx = sws_getContext (scale->in_info.width, scale->in_info.height,
       scale->in_pixfmt, scale->out_info.width, scale->out_info.height,
-      scale->out_pixfmt, swsflags | gst_ffmpegscale_method_flags[scale->method],
-      NULL, NULL, NULL);
+      scale->out_pixfmt, swsflags, NULL, NULL, NULL);
   if (!scale->ctx)
     goto setup_failed;
 
