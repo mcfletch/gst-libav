@@ -542,9 +542,6 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
     GstCaps * outcaps)
 {
   GstFFMpegScale *scale = GST_FFMPEGSCALE (trans);
-#ifdef HAVE_ORC
-  guint mmx_flags, altivec_flags;
-#endif
   gint swsflags;
   gboolean ok;
 
@@ -580,26 +577,7 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
       GST_VIDEO_INFO_WIDTH (&scale->out_info),
       GST_VIDEO_INFO_HEIGHT (&scale->out_info));
 
-#if 0
-#ifdef HAVE_ORC
-  // Apparently previously libswscale would let you configure the particular
-  // orc backend you were going to use, but these flag values are now used 
-  // solely for method-selection...
-  mmx_flags = orc_target_get_default_flags (orc_target_get_by_name ("mmx"));
-  altivec_flags =
-      orc_target_get_default_flags (orc_target_get_by_name ("altivec"));
-  swsflags = (mmx_flags & ORC_TARGET_MMX_MMX ? AV_CPU_FLAG_MMX : 0)
-      | (mmx_flags & ORC_TARGET_MMX_MMXEXT ? AV_CPU_FLAG_MMXEXT : 0)
-      | (mmx_flags & ORC_TARGET_MMX_3DNOW ? AV_CPU_FLAG_3DNOW : 0)
-      | (altivec_flags & ORC_TARGET_ALTIVEC_ALTIVEC ? AV_CPU_FLAG_ALTIVEC : 0);
-#else
-  swsflags = 0;
-#endif
-#endif
-
-  swsflags = 0;
-
-  swsflags |= gst_ffmpegscale_method_flags[scale->method];
+  swsflags = gst_ffmpegscale_method_flags[scale->method];
 
   GST_DEBUG_OBJECT (scale, "SWS flags %d", swsflags);
 
