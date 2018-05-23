@@ -300,7 +300,7 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
 
   othercaps = gst_caps_make_writable (othercaps);
 
-  GST_WARNING_OBJECT (trans, "trying to fixate othercaps %" GST_PTR_FORMAT
+  GST_DEBUG_OBJECT (trans, "trying to fixate othercaps %" GST_PTR_FORMAT
       " based on caps %" GST_PTR_FORMAT, othercaps, caps);
 
   // TODO: reference is lost here...
@@ -313,7 +313,7 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
   ins = gst_caps_get_structure (caps, 0);
   outs = gst_caps_get_structure (othercaps, 0);
   if (gst_caps_get_size (othercaps) > 1) {
-    GST_DEBUG_OBJECT (trans, "Non-simple othercaps: %s",
+    GST_WARNING_OBJECT (trans, "Non-simple othercaps: %s",
         gst_caps_to_string (caps));
   }
 
