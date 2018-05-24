@@ -46,6 +46,7 @@ enum
 {
   PROP_0,
   PROP_MODE,
+  PROP_SD_ONLY,
   PROP_LAST
 };
 
@@ -88,6 +89,7 @@ typedef struct _GstFFMpegDeinterlace
   gint to_size;
 
   GstFFMpegDeinterlaceMode mode;
+  gboolean sd_only;
 
   gboolean interlaced;          /* is input interlaced? */
   gboolean passthrough;
@@ -171,6 +173,11 @@ gst_ffmpegdeinterlace_class_init (GstFFMpegDeinterlaceClass * klass)
       g_param_spec_enum ("mode", "Mode", "Deinterlace Mode",
           GST_TYPE_FFMPEGDEINTERLACE_MODES,
           DEFAULT_MODE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
+      );
+  g_object_class_install_property (gobject_class, PROP_SD_ONLY,
+      g_param_spec_boolean ("sd-only", "SD Only",
+          "Only apply deinterlacer to buffers less than 720 width",
+          FALSE, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
       );
 
   gst_element_class_add_static_pad_template (element_class, &src_factory);
@@ -290,6 +297,7 @@ gst_ffmpegdeinterlace_init (GstFFMpegDeinterlace * deinterlace)
   deinterlace->passthrough = FALSE;
   deinterlace->reconfigure = FALSE;
   deinterlace->mode = DEFAULT_MODE;
+  deinterlace->sd_only = 0;
   deinterlace->new_mode = -1;
   deinterlace->last_width = -1;
   deinterlace->last_height = -1;
@@ -418,8 +426,11 @@ gst_ffmpegdeinterlace_chain (GstPad * pad, GstObject * parent,
     GST_OBJECT_UNLOCK (deinterlace);
   }
 
-  if (deinterlace->passthrough)
+  if (deinterlace->passthrough ||
+      (deinterlace->sd_only && deinterlace->width > 720)
+      ) {
     return gst_pad_push (deinterlace->srcpad, inbuf);
+  }
 
   outbuf = gst_buffer_new_and_alloc (deinterlace->to_size);
 
@@ -463,6 +474,12 @@ gst_ffmpegdeinterlace_set_property (GObject * object, guint prop_id,
   self = GST_FFMPEGDEINTERLACE (object);
 
   switch (prop_id) {
+    case PROP_SD_ONLY:{
+      GST_OBJECT_LOCK (self);
+      self->sd_only = g_value_get_boolean (value);
+      GST_OBJECT_UNLOCK (self);
+      break;
+    }
     case PROP_MODE:{
       gint new_mode;
 
@@ -494,6 +511,9 @@ gst_ffmpegdeinterlace_get_property (GObject * object, guint prop_id,
   self = GST_FFMPEGDEINTERLACE (object);
 
   switch (prop_id) {
+    case PROP_SD_ONLY:
+      g_value_set_boolean (value, self->sd_only);
+      break;
     case PROP_MODE:
       g_value_set_enum (value, self->mode);
       break;
