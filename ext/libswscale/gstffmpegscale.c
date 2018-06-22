@@ -24,6 +24,7 @@
 #endif
 
 #include <libswscale/swscale.h>
+#include <libavutil/cpu.h>
 
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
@@ -238,24 +239,6 @@ gst_ffmpegscale_finalize (GObject * object)
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
-/* copies the given caps */
-static GstCaps *
-gst_ffmpegscale_caps_remove_format_info (GstCaps * caps)
-{
-  int i;
-  GstStructure *structure;
-
-  caps = gst_caps_copy (caps);
-
-  for (i = 0; i < gst_caps_get_size (caps); i++) {
-    structure = gst_caps_get_structure (caps, i);
-
-    gst_structure_remove_field (structure, "format");
-  }
-
-  return caps;
-}
-
 static GstCaps *
 gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
     GstPadDirection direction, GstCaps * caps, GstCaps * filter)
@@ -263,33 +246,45 @@ gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
   GstCaps *ret;
   GstStructure *structure;
   const GValue *par;
+  guint structure_index = 0;
 
-  /* this function is always called with a simple caps */
-  g_return_val_if_fail (GST_CAPS_IS_SIMPLE (caps), NULL);
+  // This assertion seems wrong, the code below should be 
+  // explicitly allowing for alternative structures in caps
+  // g_return_val_if_fail (GST_CAPS_IS_SIMPLE (caps), NULL);
 
-  structure = gst_caps_get_structure (caps, 0);
+  // Our goal here is to "expand" each caps sub-structure such that 
+  // the resulting caps capture the idea that we can change the size
+  // and colour-space format...
+
+  GST_DEBUG_OBJECT (trans, "Caps to transform: %s", gst_caps_to_string (caps));
 
   ret = gst_caps_copy (caps);
-  structure = gst_structure_copy (gst_caps_get_structure (ret, 0));
 
-  gst_structure_set (structure,
-      "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
-      "height", GST_TYPE_INT_RANGE, 1, G_MAXINT, NULL);
+  for (structure_index = 0; structure_index < gst_caps_get_size (caps);
+      structure_index++) {
+    // Get a *copy* of the nth structure in caps
+    structure = gst_structure_copy (gst_caps_get_structure (ret, 0));
+    // Set the width/height values to anything we can handle
 
-  ret = gst_caps_merge_structure (ret, gst_structure_copy (structure));
-
-  /* if pixel aspect ratio, make a range of it */
-  if ((par = gst_structure_get_value (structure, "pixel-aspect-ratio"))) {
     gst_structure_set (structure,
-        "pixel-aspect-ratio", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1, NULL);
+        "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
+        "height", GST_TYPE_INT_RANGE, 1, G_MAXINT, NULL);
+    gst_structure_remove_field (structure, "format");
 
-    ret = gst_caps_merge_structure (ret, structure);
-  } else {
-    gst_structure_free (structure);
+    // Now merge that updated structure into the return caps
+    ret = gst_caps_merge_structure (ret, gst_structure_copy (structure));
+
+    /* iff pixel aspect ratio is defined, make a range of it */
+    if ((par = gst_structure_get_value (structure, "pixel-aspect-ratio"))) {
+      gst_structure_set (structure,
+          "pixel-aspect-ratio", GST_TYPE_FRACTION_RANGE, 0, 1, G_MAXINT, 1,
+          NULL);
+      // note: takes ownership of the pass structure
+      ret = gst_caps_merge_structure (ret, structure);
+    } else {
+      gst_structure_free (structure);
+    }
   }
-
-  /* now also unfix colour space format */
-  gst_caps_append (ret, gst_ffmpegscale_caps_remove_format_info (ret));
 
   GST_DEBUG_OBJECT (trans, "returning caps: %" GST_PTR_FORMAT, ret);
 
@@ -308,8 +303,19 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
   GST_DEBUG_OBJECT (trans, "trying to fixate othercaps %" GST_PTR_FORMAT
       " based on caps %" GST_PTR_FORMAT, othercaps, caps);
 
+  // TODO: reference is lost here...
+  //othercaps = gst_caps_intersect_full(caps,othercaps,GST_CAPS_INTERSECT_FIRST);
+  //GST_DEBUG_OBJECT (trans, "intersected %s",gst_caps_to_string(othercaps));
+
+  othercaps = gst_caps_simplify (othercaps);
+
+  // Again, this assumption that there's only one structure in the caps...
   ins = gst_caps_get_structure (caps, 0);
   outs = gst_caps_get_structure (othercaps, 0);
+  if (gst_caps_get_size (othercaps) > 1) {
+    GST_WARNING_OBJECT (trans, "Non-simple othercaps: %s",
+        gst_caps_to_string (caps));
+  }
 
   from_par = gst_structure_get_value (ins, "pixel-aspect-ratio");
   to_par = gst_structure_get_value (outs, "pixel-aspect-ratio");
@@ -344,8 +350,23 @@ gst_ffmpegscale_fixate_caps (GstBaseTransform * trans,
     if (gst_structure_get_int (outs, "height", &h))
       ++count;
     if (count == 2) {
-      GST_DEBUG_OBJECT (trans, "dimensions already set to %dx%d, not fixating",
-          w, h);
+      const GValue *out_format;
+      out_format = gst_structure_get_value (outs, "format");
+      if (!gst_value_is_fixed (out_format)) {
+        // Not quite right here, as in_format might not be acceptable, but we 
+        // can transform to it
+        if (!gst_structure_fixate_field_string (outs, "format",
+                gst_structure_get_string (ins, "format"))) {
+          GST_DEBUG_OBJECT (trans,
+              "Need to do a format transformation, making assumption we can");
+          gst_structure_fixate_field (outs, "format");
+        };
+      }
+
+      gst_structure_fixate_field_nearest_fraction (outs, "pixel-aspect-ratio",
+          from_par_n, from_par_d);
+      GST_DEBUG_OBJECT (trans, "dimensions already set to %dx%d => %s", w, h,
+          gst_caps_to_string (othercaps));
       return othercaps;
     }
 
@@ -448,8 +469,10 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
 
   GST_DEBUG ("converting caps %" GST_PTR_FORMAT, caps);
 
-  if (gst_video_info_from_caps (&info, caps))
+  if (!gst_video_info_from_caps (&info, caps))
     goto invalid_caps;
+
+  GST_DEBUG ("video info format %s", GST_VIDEO_INFO_NAME (&info));
 
   switch (GST_VIDEO_INFO_FORMAT (&info)) {
     case GST_VIDEO_FORMAT_YUY2:
@@ -473,9 +496,11 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
     case GST_VIDEO_FORMAT_ARGB:
       pix_fmt = AV_PIX_FMT_ARGB;
       break;
+    case GST_VIDEO_FORMAT_RGBx:        // TODO: is there a better format here? we don't actually want the alpha processed...
     case GST_VIDEO_FORMAT_RGBA:
       pix_fmt = AV_PIX_FMT_RGBA;
       break;
+    case GST_VIDEO_FORMAT_BGRx:
     case GST_VIDEO_FORMAT_BGRA:
       pix_fmt = AV_PIX_FMT_BGRA;
       break;
@@ -506,6 +531,8 @@ gst_ffmpeg_caps_to_pixfmt (const GstCaps * caps)
   /* ERROR */
 invalid_caps:
   {
+    GST_ERROR ("Unable to convert caps to videoinfo %" GST_PTR_FORMAT
+        " fixed=%d", caps, gst_caps_is_fixed (caps));
     return AV_PIX_FMT_NONE;
   }
 }
@@ -515,9 +542,6 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
     GstCaps * outcaps)
 {
   GstFFMpegScale *scale = GST_FFMPEGSCALE (trans);
-#ifdef HAVE_ORC
-  guint mmx_flags, altivec_flags;
-#endif
   gint swsflags;
   gboolean ok;
 
@@ -530,7 +554,7 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
   }
 
   ok = gst_video_info_from_caps (&scale->in_info, incaps);
-  ok &= gst_video_info_from_caps (&scale->out_info, outcaps);
+  ok = gst_video_info_from_caps (&scale->out_info, outcaps) && ok;
 
   scale->in_pixfmt = gst_ffmpeg_caps_to_pixfmt (incaps);
   scale->out_pixfmt = gst_ffmpeg_caps_to_pixfmt (outcaps);
@@ -538,8 +562,12 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
   if (!ok || scale->in_pixfmt == AV_PIX_FMT_NONE ||
       scale->out_pixfmt == AV_PIX_FMT_NONE ||
       GST_VIDEO_INFO_FORMAT (&scale->in_info) == GST_VIDEO_FORMAT_UNKNOWN ||
-      GST_VIDEO_INFO_FORMAT (&scale->out_info) == GST_VIDEO_FORMAT_UNKNOWN)
+      GST_VIDEO_INFO_FORMAT (&scale->out_info) == GST_VIDEO_FORMAT_UNKNOWN) {
+    GST_ERROR_OBJECT (trans,
+        "Rejecting format parse=%d in=%d out=%d",
+        ok, scale->in_pixfmt, scale->out_pixfmt);
     goto refuse_caps;
+  }
 
   GST_DEBUG_OBJECT (scale, "format %d => %d, from=%dx%d -> to=%dx%d",
       GST_VIDEO_INFO_FORMAT (&scale->in_info),
@@ -549,22 +577,13 @@ gst_ffmpegscale_set_caps (GstBaseTransform * trans, GstCaps * incaps,
       GST_VIDEO_INFO_WIDTH (&scale->out_info),
       GST_VIDEO_INFO_HEIGHT (&scale->out_info));
 
-#ifdef HAVE_ORC
-  mmx_flags = orc_target_get_default_flags (orc_target_get_by_name ("mmx"));
-  altivec_flags =
-      orc_target_get_default_flags (orc_target_get_by_name ("altivec"));
-  swsflags = (mmx_flags & ORC_TARGET_MMX_MMX ? SWS_CPU_CAPS_MMX : 0)
-      | (mmx_flags & ORC_TARGET_MMX_MMXEXT ? SWS_CPU_CAPS_MMX2 : 0)
-      | (mmx_flags & ORC_TARGET_MMX_3DNOW ? SWS_CPU_CAPS_3DNOW : 0)
-      | (altivec_flags & ORC_TARGET_ALTIVEC_ALTIVEC ? SWS_CPU_CAPS_ALTIVEC : 0);
-#else
-  swsflags = 0;
-#endif
+  swsflags = gst_ffmpegscale_method_flags[scale->method];
+
+  GST_DEBUG_OBJECT (scale, "SWS flags %d", swsflags);
 
   scale->ctx = sws_getContext (scale->in_info.width, scale->in_info.height,
       scale->in_pixfmt, scale->out_info.width, scale->out_info.height,
-      scale->out_pixfmt, swsflags | gst_ffmpegscale_method_flags[scale->method],
-      NULL, NULL, NULL);
+      scale->out_pixfmt, swsflags, NULL, NULL, NULL);
   if (!scale->ctx)
     goto setup_failed;
 
