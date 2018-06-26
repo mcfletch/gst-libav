@@ -286,6 +286,7 @@ gst_ffmpegscale_transform_caps (GstBaseTransform * trans,
     }
   }
 
+  ret = gst_caps_simplify (ret);
   GST_DEBUG_OBJECT (trans, "returning caps: %" GST_PTR_FORMAT, ret);
 
   return ret;
